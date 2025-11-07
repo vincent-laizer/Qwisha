@@ -2,6 +2,8 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+
+    id("kotlin-kapt")
 }
 
 android {
@@ -44,7 +46,7 @@ dependencies {
     implementation(libs.androidx.constraintlayout.compose)
     implementation(libs.androidx.material.icons.core)
     implementation(libs.androidx.room.runtime)
-    implementation(libs.androidx.room.compiler)
+    kapt("androidx.room:room-compiler:2.8.3")
     implementation(libs.androidx.room.ktx)
 
     implementation(libs.androidx.core.ktx)
