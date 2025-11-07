@@ -634,7 +634,7 @@ fun ConversationsScreen(navController: NavHostController, db: AppDatabase) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Messages", fontWeight = FontWeight.Bold) },
+                title = { Text("Qwisha", fontWeight = FontWeight.Bold) },
                 actions = {
                     IconButton(onClick = { showSearch = !showSearch }) {
                         Icon(Icons.Default.Search, contentDescription = "Search")
