@@ -1,14 +1,10 @@
 package com.tanzaniaprogrammers.qwisha
 
 import android.Manifest
-import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
 import android.os.Build
 import android.os.Bundle
 import android.telephony.SmsManager
-import android.telephony.SmsMessage
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -52,21 +48,30 @@ import androidx.room.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
+import android.provider.ContactsContract
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.*
 
+// Generate a 5-character alphanumeric ID
+fun generateShortId(): String {
+    val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    return (1..5)
+        .map { chars.random() }
+        .joinToString("")
+}
+
 class MainActivity : ComponentActivity() {
 
     private lateinit var db: AppDatabase
-    private var smsReceiver: BroadcastReceiver? = null
 
     @RequiresApi(Build.VERSION_CODES.O)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        db = Room.databaseBuilder(applicationContext, AppDatabase::class.java, "sms_overlay_db").build()
+        db = Room.databaseBuilder(applicationContext, AppDatabase::class.java, "sms_overlay_db")
+            .addMigrations(AppDatabase.MIGRATION_1_2)
+            .build()
 
         // Request permissions
         val permissionsLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { perms ->
@@ -75,30 +80,12 @@ class MainActivity : ComponentActivity() {
         permissionsLauncher.launch(arrayOf(
             Manifest.permission.SEND_SMS,
             Manifest.permission.RECEIVE_SMS,
-            Manifest.permission.READ_SMS
+            Manifest.permission.READ_SMS,
+            Manifest.permission.READ_CONTACTS
         ))
 
-        // Register SMS receiver
-        smsReceiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) {
-                if (intent?.action == "android.provider.Telephony.SMS_RECEIVED") {
-                    val bundle = intent.extras
-                    val pdus = bundle?.get("pdus") as? Array<*>
-                    pdus?.forEach { pdu ->
-                        val msg = SmsMessage.createFromPdu(pdu as ByteArray)
-                        val body = msg.messageBody
-                        val sender = msg.originatingAddress ?: ""
-                        handleIncomingSms(sender, body)
-                    }
-                }
-            }
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(smsReceiver, IntentFilter("android.provider.Telephony.SMS_RECEIVED"), Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(smsReceiver, IntentFilter("android.provider.Telephony.SMS_RECEIVED"))
-        }
+        // Note: SMS reception is handled by SmsReceiver declared in AndroidManifest.xml
+        // This ensures SMS are received even when the app is closed
 
         setContent {
             SmsOverlayTheme {
@@ -116,32 +103,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        smsReceiver?.let { unregisterReceiver(it) }
-    }
-
-    private fun handleIncomingSms(sender: String, body: String) {
-        lifecycleScope.launch {
-            try {
-                val json = JSONObject(body)
-                val cmd = json.getString("cmd")
-                val msgId = json.getString("id")
-                val replyTo = json.optString("replyTo", null)
-                val content = json.optString("content", null)
-
-                withContext(Dispatchers.IO) {
-                    when (cmd) {
-                        "send" -> db.messageDao().insert(Message(msgId, sender, content ?: "", false, replyTo, "delivered", System.currentTimeMillis()))
-                        "edit" -> db.messageDao().updateContent(msgId, content ?: "")
-                        "delete" -> db.messageDao().deleteById(msgId)
-                    }
-                }
-            } catch (_: Exception) {
-                // ignore non-overlay messages
-            }
-        }
-    }
 }
 
 // ------------------ Room Entities & DAO ------------------
@@ -154,7 +115,8 @@ data class Message(
     val outgoing: Boolean,
     val replyTo: String?,
     val status: String,
-    val timestamp: Long
+    val timestamp: Long,
+    val hasOverlayHeader: Boolean = false  // True if message was sent/received with overlay protocol header
 )
 
 @Dao
@@ -182,9 +144,16 @@ interface MessageDao {
     fun searchMessagesFlow(query: String): kotlinx.coroutines.flow.Flow<List<Message>>
 }
 
-@Database(entities = [Message::class], version = 1)
+@Database(entities = [Message::class], version = 2)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun messageDao(): MessageDao
+
+    companion object {
+        // Migration from version 1 to 2: add hasOverlayHeader column
+        val MIGRATION_1_2 = androidx.room.migration.Migration(1, 2) {
+            it.execSQL("ALTER TABLE Message ADD COLUMN hasOverlayHeader INTEGER NOT NULL DEFAULT 0")
+        }
+    }
 }
 
 data class ThreadSummary(
@@ -224,14 +193,28 @@ fun ThreadScreen(threadId: String, db: AppDatabase, onBack: () -> Unit) {
         if (inputText.isBlank() || sendingMessage) return
 
         sendingMessage = true
-        val msgId = editingMsgId ?: UUID.randomUUID().toString()
-        val json = JSONObject().apply {
-            put("id", msgId)
-            put("cmd", if (editingMsgId != null) "edit" else "send")
-            put("replyTo", replyToMsg?.id ?: JSONObject.NULL)
-            put("content", inputText)
+        // Always generate a new message ID for the SMS being sent (5 characters)
+        val msgId = generateShortId()
+
+        // Build compact header: @i=<MSGID>;c=<CMD>;r=<REFID> content
+        val cmd = when {
+            editingMsgId != null -> "edit"
+            replyToMsg != null -> "reply"
+            else -> "send"
         }
-        val smsBody = json.toString()
+        val refId = when {
+            editingMsgId != null -> editingMsgId  // Original message ID being edited
+            replyToMsg != null -> replyToMsg?.id  // Message being replied to
+            else -> null
+        }
+
+        val header = buildString {
+            append("@i=$msgId;c=$cmd")
+            if (refId != null) {
+                append(";r=$refId")
+            }
+        }
+        val smsBody = "$header $inputText"
 
         // Send SMS
         scope.launch {
@@ -240,17 +223,23 @@ fun ThreadScreen(threadId: String, db: AppDatabase, onBack: () -> Unit) {
                     SmsManager.getDefault().sendTextMessage(threadId, null, smsBody, null, null)
                 }
 
-                val newMsg = Message(
-                    msgId,
-                    threadId,
-                    inputText,
-                    true,
-                    replyToMsg?.id,
-                    "sent",
-                    System.currentTimeMillis()
-                )
-
-                db.messageDao().insert(newMsg)
+                if (editingMsgId != null) {
+                    // Update existing message
+                    db.messageDao().updateContent(editingMsgId!!, inputText)
+                } else {
+                    // Insert new message (always has overlay header since we send it)
+                    val newMsg = Message(
+                        msgId,
+                        threadId,
+                        inputText,
+                        true,
+                        replyToMsg?.id,
+                        "sent",
+                        System.currentTimeMillis(),
+                        hasOverlayHeader = true
+                    )
+                    db.messageDao().insert(newMsg)
+                }
 
                 // Clear input
                 inputText = ""
@@ -434,14 +423,12 @@ fun ThreadScreen(threadId: String, db: AppDatabase, onBack: () -> Unit) {
                                 editingMsgId = it.id
                             },
                             onDelete = {
-                                val json = JSONObject().apply {
-                                    put("id", it.id)
-                                    put("cmd", "delete")
-                                }
+                                val header = "@i=${generateShortId()};c=delete;r=${it.id}"
+                                val smsBody = "$header "
                                 scope.launch {
                                     try {
                                         withContext(Dispatchers.IO) {
-                                            SmsManager.getDefault().sendTextMessage(threadId, null, json.toString(), null, null)
+                                            SmsManager.getDefault().sendTextMessage(threadId, null, smsBody, null, null)
                                         }
                                         db.messageDao().deleteById(it.id)
                                     } catch (_: Exception) {}
@@ -544,6 +531,9 @@ fun MessageBubble(
             }
 
             // Context menu
+            // Only show overlay features (reply, edit, delete) for messages with overlay header
+            val supportsOverlay = message.hasOverlayHeader
+
             DropdownMenu(
                 expanded = showMenu,
                 onDismissRequest = { showMenu = false }
@@ -551,12 +541,16 @@ fun MessageBubble(
                 DropdownMenuItem(
                     text = { Text("Reply") },
                     onClick = {
-                        onReply(message)
+                        if (supportsOverlay) {
+                            onReply(message)
+                        }
                         showMenu = false
                     },
-                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null) }
+                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null) },
+                    enabled = supportsOverlay
                 )
-                if (message.outgoing) {
+                // Edit is only available for outgoing messages with overlay header (messages you sent)
+                if (message.outgoing && supportsOverlay) {
                     DropdownMenuItem(
                         text = { Text("Edit") },
                         onClick = {
@@ -569,10 +563,13 @@ fun MessageBubble(
                 DropdownMenuItem(
                     text = { Text("Delete") },
                     onClick = {
-                        onDelete(message)
+                        if (supportsOverlay) {
+                            onDelete(message)
+                        }
                         showMenu = false
                     },
-                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) }
+                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
+                    enabled = supportsOverlay
                 )
             }
         }
@@ -713,6 +710,11 @@ fun ConversationsScreen(navController: NavHostController, db: AppDatabase) {
     }
 }
 
+data class Contact(
+    val name: String,
+    val phoneNumber: String
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NewMessageDialog(
@@ -721,23 +723,39 @@ fun NewMessageDialog(
 ) {
     var phoneNumber by remember { mutableStateOf("") }
     var showError by remember { mutableStateOf(false) }
+    var contacts by remember { mutableStateOf<List<Contact>>(emptyList()) }
+    var searchQuery by remember { mutableStateOf("") }
+    var showContacts by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    // Load contacts
+    LaunchedEffect(Unit) {
+        contacts = loadContacts(context)
+    }
+
+    val filteredContacts = if (searchQuery.isBlank()) {
+        contacts
+    } else {
+        contacts.filter {
+            it.name.contains(searchQuery, ignoreCase = true) ||
+                    it.phoneNumber.contains(searchQuery, ignoreCase = true)
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("New Message") },
         text = {
-            Column {
-                Text(
-                    "Enter a phone number to start a conversation",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                )
-                Spacer(modifier = Modifier.height(16.dp))
+            Column(modifier = Modifier.heightIn(max = 400.dp)) {
                 OutlinedTextField(
                     value = phoneNumber,
                     onValueChange = {
                         phoneNumber = it
                         showError = false
+                        // Auto-show contacts when typing
+                        if (it.isNotBlank()) {
+                            showContacts = true
+                        }
                     },
                     label = { Text("Phone Number") },
                     placeholder = { Text("+255 123 456 789") },
@@ -759,8 +777,75 @@ fun NewMessageDialog(
                             }
                         }
                     ),
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    trailingIcon = {
+                        IconButton(onClick = { showContacts = !showContacts }) {
+                            Icon(
+                                if (showContacts) Icons.Default.KeyboardArrowUp else Icons.Default.ArrowDropDown,
+                                contentDescription = "Toggle contacts"
+                            )
+                        }
+                    }
                 )
+
+                if (showContacts && contacts.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "Contacts",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp)
+                    )
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        placeholder = { Text("Search contacts...") },
+                        singleLine = true,
+                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                        trailingIcon = {
+                            if (searchQuery.isNotEmpty()) {
+                                IconButton(onClick = { searchQuery = "" }) {
+                                    Icon(Icons.Default.Close, contentDescription = "Clear")
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    LazyColumn(
+                        modifier = Modifier.heightIn(max = 200.dp)
+                    ) {
+                        items(filteredContacts) { contact ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        phoneNumber = contact.phoneNumber
+                                        showContacts = false
+                                    }
+                                    .padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                AvatarPlaceholder(name = contact.name, modifier = Modifier.size(40.dp))
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        contact.name,
+                                        fontWeight = FontWeight.Medium,
+                                        fontSize = 14.sp
+                                    )
+                                    Text(
+                                        contact.phoneNumber,
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                    )
+                                }
+                            }
+                            Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                        }
+                    }
+                }
             }
         },
         confirmButton = {
@@ -924,6 +1009,40 @@ fun AvatarPlaceholder(name: String, modifier: Modifier = Modifier) {
             fontSize = 18.sp
         )
     }
+}
+
+// Load contacts from device
+suspend fun loadContacts(context: Context): List<Contact> = withContext(Dispatchers.IO) {
+    val contacts = mutableListOf<Contact>()
+    try {
+        val cursor = context.contentResolver.query(
+            ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+            arrayOf(
+                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                ContactsContract.CommonDataKinds.Phone.NUMBER
+            ),
+            null,
+            null,
+            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC"
+        )
+        cursor?.use {
+            val nameIndex = it.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+            val numberIndex = it.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+
+            while (it.moveToNext()) {
+                val name = it.getString(nameIndex) ?: ""
+                val number = it.getString(numberIndex) ?: ""
+                if (name.isNotBlank() && number.isNotBlank()) {
+                    // Clean phone number (remove spaces, dashes, etc.)
+                    val cleanNumber = number.replace(Regex("[^+0-9]"), "")
+                    contacts.add(Contact(name, cleanNumber))
+                }
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    contacts.distinctBy { it.phoneNumber }
 }
 
 @RequiresApi(Build.VERSION_CODES.O)
