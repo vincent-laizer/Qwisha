@@ -9,6 +9,7 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 
 private val DarkColorScheme = darkColorScheme(
@@ -49,6 +50,28 @@ fun QwishaTheme(
         darkTheme -> DarkColorScheme
         else -> LightColorScheme
     }
+
+    MaterialTheme(
+        colorScheme = colorScheme,
+        typography = Typography,
+        content = content
+    )
+}
+
+@Composable
+fun SmsOverlayTheme(content: @Composable () -> Unit) {
+    val colorScheme = lightColorScheme(
+        primary = Color(0xFF00695C),
+        onPrimary = Color.White,
+        primaryContainer = Color(0xFFB2DFDB),
+        secondary = Color(0xFF26A69A),
+        surface = Color(0xFFFAFAFA),
+        surfaceVariant = Color(0xFFE0E0E0),
+        background = Color(0xFFFFFFFF),
+        onSurface = Color(0xFF212121),
+        onSurfaceVariant = Color(0xFF424242),
+        outline = Color(0xFFBDBDBD)
+    )
 
     MaterialTheme(
         colorScheme = colorScheme,
