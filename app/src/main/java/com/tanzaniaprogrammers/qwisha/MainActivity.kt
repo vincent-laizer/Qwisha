@@ -1,10 +1,17 @@
 package com.tanzaniaprogrammers.qwisha
 
 import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.Bundle
 import android.telephony.SmsManager
+import androidx.core.app.NotificationCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -65,6 +72,8 @@ fun generateShortId(): String {
 class MainActivity : ComponentActivity() {
 
     private lateinit var db: AppDatabase
+    private var smsSentReceiver: BroadcastReceiver? = null
+    private var smsDeliveredReceiver: BroadcastReceiver? = null
 
     @RequiresApi(Build.VERSION_CODES.O)
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -72,6 +81,9 @@ class MainActivity : ComponentActivity() {
         db = Room.databaseBuilder(applicationContext, AppDatabase::class.java, "sms_overlay_db")
             .addMigrations(AppDatabase.MIGRATION_1_2)
             .build()
+
+        // Create notification channel
+        createNotificationChannel()
 
         // Request permissions
         val permissionsLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { perms ->
@@ -81,8 +93,50 @@ class MainActivity : ComponentActivity() {
             Manifest.permission.SEND_SMS,
             Manifest.permission.RECEIVE_SMS,
             Manifest.permission.READ_SMS,
-            Manifest.permission.READ_CONTACTS
+            Manifest.permission.READ_CONTACTS,
+            Manifest.permission.POST_NOTIFICATIONS
         ))
+
+        // Register SMS delivery receivers
+        smsSentReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                val msgId = intent?.getStringExtra("msgId") ?: return
+                val resultCode = resultCode
+                lifecycleScope.launch {
+                    withContext(Dispatchers.IO) {
+                        val status = when (resultCode) {
+                            RESULT_OK -> "sent"
+                            SmsManager.RESULT_ERROR_GENERIC_FAILURE -> "failed"
+                            SmsManager.RESULT_ERROR_NO_SERVICE -> "failed"
+                            SmsManager.RESULT_ERROR_NULL_PDU -> "failed"
+                            SmsManager.RESULT_ERROR_RADIO_OFF -> "failed"
+                            else -> "pending"
+                        }
+                        db.messageDao().updateStatus(msgId, status)
+                    }
+                }
+            }
+        }
+
+        smsDeliveredReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                val msgId = intent?.getStringExtra("msgId") ?: return
+                lifecycleScope.launch {
+                    withContext(Dispatchers.IO) {
+                        db.messageDao().updateStatus(msgId, "delivered")
+                    }
+                }
+            }
+        }
+
+        val flag = if (Build.VERSION.SDK_INT >= 33) {
+            Context.RECEIVER_EXPORTED
+        } else {
+            0
+        }
+
+        registerReceiver(smsSentReceiver, IntentFilter("SMS_SENT"), flag)
+        registerReceiver(smsDeliveredReceiver, IntentFilter("SMS_DELIVERED"), flag)
 
         // Note: SMS reception is handled by SmsReceiver declared in AndroidManifest.xml
         // This ensures SMS are received even when the app is closed
@@ -90,6 +144,15 @@ class MainActivity : ComponentActivity() {
         setContent {
             SmsOverlayTheme {
                 val navController = rememberNavController()
+                val openThreadId = intent.getStringExtra("openThreadId")
+
+                // Navigate to thread if opened from notification
+                LaunchedEffect(openThreadId) {
+                    if (openThreadId != null) {
+                        navController.navigate("chat/$openThreadId")
+                    }
+                }
+
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     NavHost(navController = navController, startDestination = "threads") {
                         composable("threads") { ConversationsScreen(navController, db) }
@@ -100,6 +163,26 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        smsSentReceiver?.let { unregisterReceiver(it) }
+        smsDeliveredReceiver?.let { unregisterReceiver(it) }
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                "sms_channel",
+                "SMS Messages",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Notifications for received SMS messages"
+            }
+            val notificationManager = getSystemService(NotificationManager::class.java)
+            notificationManager.createNotificationChannel(channel)
         }
     }
 
@@ -132,6 +215,9 @@ interface MessageDao {
 
     @Query("UPDATE Message SET content = :content WHERE id = :id")
     suspend fun updateContent(id: String, content: String)
+
+    @Query("UPDATE Message SET status = :status WHERE id = :id")
+    suspend fun updateStatus(id: String, status: String)
 
     @Query("DELETE FROM Message WHERE id = :id")
     suspend fun deleteById(id: String)
@@ -197,10 +283,11 @@ fun ThreadScreen(threadId: String, db: AppDatabase, onBack: () -> Unit) {
         val msgId = generateShortId()
 
         // Build compact header: @i=<MSGID>;c=<CMD>;r=<REFID> content
+        // Commands: s=send, r=reply, e=edit, d=delete
         val cmd = when {
-            editingMsgId != null -> "edit"
-            replyToMsg != null -> "reply"
-            else -> "send"
+            editingMsgId != null -> "e"
+            replyToMsg != null -> "r"
+            else -> "s"
         }
         val refId = when {
             editingMsgId != null -> editingMsgId  // Original message ID being edited
@@ -216,11 +303,24 @@ fun ThreadScreen(threadId: String, db: AppDatabase, onBack: () -> Unit) {
         }
         val smsBody = "$header $inputText"
 
-        // Send SMS
+        // Send SMS with delivery report
         scope.launch {
             try {
+                val sentIntent = PendingIntent.getBroadcast(
+                    context,
+                    msgId.hashCode(),
+                    Intent("SMS_SENT").putExtra("msgId", msgId),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+                val deliveryIntent = PendingIntent.getBroadcast(
+                    context,
+                    msgId.hashCode(),
+                    Intent("SMS_DELIVERED").putExtra("msgId", msgId),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+
                 withContext(Dispatchers.IO) {
-                    SmsManager.getDefault().sendTextMessage(threadId, null, smsBody, null, null)
+                    SmsManager.getDefault().sendTextMessage(threadId, null, smsBody, sentIntent, deliveryIntent)
                 }
 
                 if (editingMsgId != null) {
@@ -423,11 +523,12 @@ fun ThreadScreen(threadId: String, db: AppDatabase, onBack: () -> Unit) {
                                 editingMsgId = it.id
                             },
                             onDelete = {
-                                val header = "@i=${generateShortId()};c=delete;r=${it.id}"
+                                val header = "@i=${generateShortId()};c=d;r=${it.id}"
                                 val smsBody = "$header "
                                 scope.launch {
                                     try {
                                         withContext(Dispatchers.IO) {
+                                            // Delete command doesn't need delivery reports
                                             SmsManager.getDefault().sendTextMessage(threadId, null, smsBody, null, null)
                                         }
                                         db.messageDao().deleteById(it.id)
@@ -521,12 +622,39 @@ fun MessageBubble(
                         color = if (message.outgoing) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(Modifier.height(4.dp))
-                    Text(
-                        formatTime(message.timestamp),
-                        fontSize = 10.sp,
-                        color = if (message.outgoing) Color.White.copy(alpha = 0.7f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                        modifier = Modifier.align(Alignment.End)
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Show delivery status for outgoing messages
+                        if (message.outgoing) {
+                            val statusIcon = when (message.status) {
+                                "delivered" -> Icons.Default.CheckCircle
+                                "sent" -> Icons.Default.Done
+                                "failed" -> Icons.Default.Close
+                                else -> Icons.AutoMirrored.Filled.Send
+                            }
+                            val statusColor = when (message.status) {
+                                "delivered" -> Color.White.copy(alpha = 0.7f)
+                                "sent" -> Color.White.copy(alpha = 0.5f)
+                                "failed" -> Color(0xFFFF5252)
+                                else -> Color.White.copy(alpha = 0.5f)
+                            }
+                            Icon(
+                                statusIcon,
+                                contentDescription = message.status,
+                                modifier = Modifier.size(12.dp),
+                                tint = statusColor
+                            )
+                            Spacer(Modifier.width(4.dp))
+                        }
+                        Text(
+                            formatTime(message.timestamp),
+                            fontSize = 10.sp,
+                            color = if (message.outgoing) Color.White.copy(alpha = 0.7f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
                 }
             }
 

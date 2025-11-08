@@ -15,6 +15,7 @@
     <uses-permission android:name="android.permission.WRITE_SMS" tools:ignore="ProtectedPermissions"/>
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Optional: for background SMS handling on Android 10+ -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
