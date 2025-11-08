@@ -8,6 +8,9 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.SharedPreferences
+import android.content.ClipboardManager
+import android.content.ClipData
 import android.os.Build
 import android.os.Bundle
 import android.telephony.SmsManager
@@ -262,11 +265,23 @@ fun ThreadScreen(threadId: String, db: AppDatabase, onBack: () -> Unit) {
     var showMenu by remember { mutableStateOf(false) }
     var selectedMsg by remember { mutableStateOf<Message?>(null) }
     var sendingMessage by remember { mutableStateOf(false) }
-    var useOverlayHeader by remember { mutableStateOf(true) }
 
-    val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
+
+    // Load and persist overlay header preference
+    val prefs = remember {
+        context.getSharedPreferences("qwisha_prefs", Context.MODE_PRIVATE)
+    }
+    var useOverlayHeader by remember {
+        mutableStateOf(prefs.getBoolean("use_overlay_header_$threadId", true))
+    }
+
+    // Save preference when it changes
+    LaunchedEffect(useOverlayHeader) {
+        prefs.edit().putBoolean("use_overlay_header_$threadId", useOverlayHeader).apply()
+    }
 
     // Load contact name
     var contactName by remember { mutableStateOf(threadId) }
@@ -571,7 +586,8 @@ fun ThreadScreen(threadId: String, db: AppDatabase, onBack: () -> Unit) {
                                         db.messageDao().deleteById(it.id)
                                     } catch (_: Exception) {}
                                 }
-                            }
+                            },
+                            onCopy = { }
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                     }
@@ -588,9 +604,11 @@ fun MessageBubble(
     allMessages: List<Message>,
     onReply: (Message) -> Unit,
     onEdit: (Message) -> Unit,
-    onDelete: (Message) -> Unit
+    onDelete: (Message) -> Unit,
+    onCopy: (Message) -> Unit = {}
 ) {
     var showMenu by remember { mutableStateOf(false) }
+    val context = LocalContext.current
 
     Box(
         modifier = Modifier.fillMaxWidth(),
@@ -703,6 +721,21 @@ fun MessageBubble(
                 expanded = showMenu,
                 onDismissRequest = { showMenu = false }
             ) {
+                DropdownMenuItem(
+                    text = { Text("Copy") },
+                    onClick = {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        val clip = ClipData.newPlainText("Message", message.content)
+                        clipboard.setPrimaryClip(clip)
+                        showMenu = false
+                    },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Default.Share,
+                            contentDescription = null
+                        )
+                    }
+                )
                 DropdownMenuItem(
                     text = { Text("Reply") },
                     onClick = {
@@ -1348,6 +1381,26 @@ fun SettingsScreen(navController: NavHostController) {
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(vertical = 16.dp)
                 )
+            }
+
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 16.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp)
+                    ) {
+                        Text(
+                            "Qwisha is a revolutionary SMS messaging app that extends traditional SMS capabilities with advanced features not typically available in standard messaging apps. Unlike regular SMS apps, Qwisha enables you to edit messages after sending, delete messages from both sides of the conversation, reply to specific messages with context, and search through your message history—all while working completely offline via standard SMS protocols. These features are made possible through a compact overlay protocol that embeds metadata in your messages, allowing you to enjoy modern messaging features without requiring internet connectivity or relying on third-party services.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                            lineHeight = 20.sp
+                        )
+                    }
+                }
             }
 
             item {
