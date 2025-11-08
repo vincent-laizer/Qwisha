@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.provider.ContactsContract
 import android.telephony.SmsMessage
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -16,6 +17,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.*
 
 class SmsReceiver : BroadcastReceiver() {
@@ -90,7 +92,8 @@ class SmsReceiver : BroadcastReceiver() {
                 val msgId = generateShortId()
                 val message = Message(msgId, sender, body, false, null, "delivered", System.currentTimeMillis(), hasOverlayHeader = false)
                 db.messageDao().insert(message)
-                showNotification(context, sender, body, msgId)
+                val contactName = getContactName(context, sender)
+                showNotification(context, contactName, body, msgId, sender)
                 return
             }
 
@@ -154,7 +157,8 @@ class SmsReceiver : BroadcastReceiver() {
                 val fallbackMsgId = generateShortId()
                 val fallbackMessage = Message(fallbackMsgId, sender, body, false, null, "delivered", System.currentTimeMillis(), hasOverlayHeader = false)
                 db.messageDao().insert(fallbackMessage)
-                showNotification(context, sender, body, fallbackMsgId)
+                val contactName = getContactName(context, sender)
+                showNotification(context, contactName, body, fallbackMsgId, sender)
                 return
             }
 
@@ -163,13 +167,15 @@ class SmsReceiver : BroadcastReceiver() {
                     Log.d("SmsReceiver", "Inserting send message: msgId=$msgId")
                     val message = Message(msgId!!, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
                     db.messageDao().insert(message)
-                    showNotification(context, sender, content, msgId!!)
+                    val contactName = getContactName(context, sender)
+                    showNotification(context, contactName, content, msgId!!, sender)
                 }
                 "r" -> { // reply
                     Log.d("SmsReceiver", "Inserting reply message: msgId=$msgId, refId=$refId")
                     val message = Message(msgId!!, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
                     db.messageDao().insert(message)
-                    showNotification(context, sender, content, msgId!!)
+                    val contactName = getContactName(context, sender)
+                    showNotification(context, contactName, content, msgId!!, sender)
                 }
                 "e" -> { // edit
                     Log.d("SmsReceiver", "Updating message content: refId=$refId")
@@ -192,13 +198,15 @@ class SmsReceiver : BroadcastReceiver() {
                     Log.d("SmsReceiver", "Inserting send message (old format): msgId=$msgId")
                     val message = Message(msgId!!, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
                     db.messageDao().insert(message)
-                    showNotification(context, sender, content, msgId!!)
+                    val contactName = getContactName(context, sender)
+                    showNotification(context, contactName, content, msgId!!, sender)
                 }
                 "reply" -> {
                     Log.d("SmsReceiver", "Inserting reply message (old format): msgId=$msgId")
                     val message = Message(msgId!!, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
                     db.messageDao().insert(message)
-                    showNotification(context, sender, content, msgId!!)
+                    val contactName = getContactName(context, sender)
+                    showNotification(context, contactName, content, msgId!!, sender)
                 }
                 "edit" -> {
                     Log.d("SmsReceiver", "Updating message content (old format): refId=$refId")
@@ -222,9 +230,67 @@ class SmsReceiver : BroadcastReceiver() {
         }
     }
 
-    private fun showNotification(context: Context, sender: String, content: String, msgId: String) {
+    private suspend fun getContactName(context: Context, phoneNumber: String): String = withContext(Dispatchers.IO) {
         try {
-            Log.d("SmsReceiver", "Showing notification for sender=$sender, msgId=$msgId")
+            val uri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
+            val projection = arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+            val selection = "${ContactsContract.CommonDataKinds.Phone.NUMBER} = ?"
+            val selectionArgs = arrayOf(phoneNumber)
+
+            context.contentResolver.query(uri, projection, selection, selectionArgs, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIndex = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+                    val name = cursor.getString(nameIndex)
+                    if (!name.isNullOrBlank()) {
+                        return@withContext name
+                    }
+                }
+            }
+
+            // Try with cleaned number (without formatting)
+            val cleanNumber = phoneNumber.replace(Regex("[^+0-9]"), "")
+            context.contentResolver.query(uri, projection, selection, arrayOf(cleanNumber), null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIndex = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+                    val name = cursor.getString(nameIndex)
+                    if (!name.isNullOrBlank()) {
+                        return@withContext name
+                    }
+                }
+            }
+
+            // Try matching by number ending (for cases where country code differs)
+            val numberSuffix = cleanNumber.takeLast(9) // Last 9 digits
+            context.contentResolver.query(
+                uri,
+                arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                val nameIndex = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+                val numberIndex = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+
+                while (cursor.moveToNext()) {
+                    val number = cursor.getString(numberIndex) ?: ""
+                    val cleanStoredNumber = number.replace(Regex("[^+0-9]"), "")
+                    if (cleanStoredNumber.endsWith(numberSuffix) && numberSuffix.length >= 7) {
+                        val name = cursor.getString(nameIndex)
+                        if (!name.isNullOrBlank()) {
+                            return@withContext name
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("SmsReceiver", "Error getting contact name: ${e.message}", e)
+        }
+        phoneNumber // Return phone number if contact not found
+    }
+
+    private fun showNotification(context: Context, displayName: String, content: String, msgId: String, phoneNumber: String) {
+        try {
+            Log.d("SmsReceiver", "Showing notification for displayName=$displayName, phoneNumber=$phoneNumber, msgId=$msgId")
 
             // Create notification channel for Android O+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -242,12 +308,12 @@ class SmsReceiver : BroadcastReceiver() {
                 Log.d("SmsReceiver", "Notification channel created")
             }
 
-            // Create intent to open the app and navigate to thread
+            // Create intent to open the app and navigate to thread (use phone number for navigation)
             val intent = Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
                 action = Intent.ACTION_MAIN
                 addCategory(Intent.CATEGORY_LAUNCHER)
-                putExtra("openThreadId", sender)
+                putExtra("openThreadId", phoneNumber)
             }
             val pendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 PendingIntent.getActivity(
@@ -268,7 +334,7 @@ class SmsReceiver : BroadcastReceiver() {
 
             val notification = NotificationCompat.Builder(context, "sms_channel")
                 .setSmallIcon(android.R.drawable.ic_dialog_email)
-                .setContentTitle(sender)
+                .setContentTitle(displayName)
                 .setContentText(content)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(content))
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
