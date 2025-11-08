@@ -129,8 +129,9 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        val flag = if (Build.VERSION.SDK_INT >= 33) {
-            Context.RECEIVER_EXPORTED
+        // Use RECEIVER_NOT_EXPORTED for app-local broadcasts (Android 13+)
+        val flag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Context.RECEIVER_NOT_EXPORTED
         } else {
             0
         }
@@ -306,16 +307,23 @@ fun ThreadScreen(threadId: String, db: AppDatabase, onBack: () -> Unit) {
         // Send SMS with delivery report
         scope.launch {
             try {
+                // Create explicit intents for app-local broadcasts
                 val sentIntent = PendingIntent.getBroadcast(
                     context,
                     msgId.hashCode(),
-                    Intent("SMS_SENT").putExtra("msgId", msgId),
+                    Intent("SMS_SENT").apply {
+                        setPackage(context.packageName)
+                        putExtra("msgId", msgId)
+                    },
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 )
                 val deliveryIntent = PendingIntent.getBroadcast(
                     context,
                     msgId.hashCode(),
-                    Intent("SMS_DELIVERED").putExtra("msgId", msgId),
+                    Intent("SMS_DELIVERED").apply {
+                        setPackage(context.packageName)
+                        putExtra("msgId", msgId)
+                    },
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 )
 
@@ -909,7 +917,7 @@ fun NewMessageDialog(
                     trailingIcon = {
                         IconButton(onClick = { showContacts = !showContacts }) {
                             Icon(
-                                if (showContacts) Icons.Default.KeyboardArrowUp else Icons.Default.ArrowDropDown,
+                                if (showContacts) Icons.Default.KeyboardArrowUp else Icons.Default.AccountBox,
                                 contentDescription = "Toggle contacts"
                             )
                         }
