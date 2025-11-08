@@ -1,5 +1,6 @@
 package com.tanzaniaprogrammers.qwisha
 
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -74,7 +75,13 @@ fun ThreadScreen(threadId: String, db: AppDatabase, onBack: () -> Unit) {
 
     // Mark messages as read when thread is viewed and when new messages arrive
     LaunchedEffect(threadId, messages.size) {
-        db.messageDao().markThreadAsRead(threadId)
+        scope.launch {
+            db.messageDao().markThreadAsRead(threadId)
+
+            // Cancel notification for this thread when messages are marked as read
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.cancel(threadId.hashCode())
+        }
     }
 
     // Close menu when clicking outside

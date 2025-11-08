@@ -52,6 +52,10 @@ class SmsReceiver : BroadcastReceiver() {
 
                     Log.d("SmsReceiver", "SMS from $sender: body='$body' (${body.length} chars)")
 
+                    // Use goAsync() to keep receiver alive during async processing
+                    // This is critical for receiving SMS when app is closed
+                    val pendingResult = goAsync()
+
                     // Process SMS in background
                     scope.launch {
                         try {
@@ -60,9 +64,13 @@ class SmsReceiver : BroadcastReceiver() {
                             processSms(context, db, sender, body)
                             // Database instance is managed by singleton - no need to close
                             // This ensures all Flow observers (including in MainActivity) get updates
+                            Log.d("SmsReceiver", "SMS processing completed successfully")
                         } catch (e: Exception) {
                             Log.e("SmsReceiver", "Error processing SMS: ${e.message}", e)
                             e.printStackTrace()
+                        } finally {
+                            // Finish the broadcast receiver
+                            pendingResult.finish()
                         }
                     }
                 } else {
@@ -159,22 +167,22 @@ class SmsReceiver : BroadcastReceiver() {
             when (cmd) {
                 "s" -> { // send
                     Log.d("SmsReceiver", "Inserting send message: msgId=$msgId")
-                    val message = Message(msgId, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
+                    val message = Message(msgId!!, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
                     db.messageDao().insert(message)
                     val contactName = getContactName(context, sender)
-                    showNotification(context, contactName, content, msgId, sender)
+                    showNotification(context, contactName, content, msgId!!, sender)
                 }
                 "r" -> { // reply
                     Log.d("SmsReceiver", "Inserting reply message: msgId=$msgId, refId=$refId")
-                    val message = Message(msgId, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
+                    val message = Message(msgId!!, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
                     db.messageDao().insert(message)
                     val contactName = getContactName(context, sender)
-                    showNotification(context, contactName, content, msgId, sender)
+                    showNotification(context, contactName, content, msgId!!, sender)
                 }
                 "e" -> { // edit
                     Log.d("SmsReceiver", "Updating message content: refId=$refId")
                     if (refId != null) {
-                        db.messageDao().updateContent(refId, content)
+                        db.messageDao().updateContent(refId!!, content)
                     } else {
                         Log.e("SmsReceiver", "Edit command missing refId")
                     }
@@ -182,7 +190,7 @@ class SmsReceiver : BroadcastReceiver() {
                 "d" -> { // delete
                     Log.d("SmsReceiver", "Deleting message: refId=$refId")
                     if (refId != null) {
-                        db.messageDao().deleteById(refId)
+                        db.messageDao().deleteById(refId!!)
                     } else {
                         Log.e("SmsReceiver", "Delete command missing refId")
                     }
@@ -190,28 +198,28 @@ class SmsReceiver : BroadcastReceiver() {
                 // Support old format for backward compatibility
                 "send", "normal" -> {
                     Log.d("SmsReceiver", "Inserting send message (old format): msgId=$msgId")
-                    val message = Message(msgId, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
+                    val message = Message(msgId!!, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
                     db.messageDao().insert(message)
                     val contactName = getContactName(context, sender)
-                    showNotification(context, contactName, content, msgId, sender)
+                    showNotification(context, contactName, content, msgId!!, sender)
                 }
                 "reply" -> {
                     Log.d("SmsReceiver", "Inserting reply message (old format): msgId=$msgId")
-                    val message = Message(msgId, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
+                    val message = Message(msgId!!, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
                     db.messageDao().insert(message)
                     val contactName = getContactName(context, sender)
-                    showNotification(context, contactName, content, msgId, sender)
+                    showNotification(context, contactName, content, msgId!!, sender)
                 }
                 "edit" -> {
                     Log.d("SmsReceiver", "Updating message content (old format): refId=$refId")
                     if (refId != null) {
-                        db.messageDao().updateContent(refId, content)
+                        db.messageDao().updateContent(refId!!, content)
                     }
                 }
                 "delete" -> {
                     Log.d("SmsReceiver", "Deleting message (old format): refId=$refId")
                     if (refId != null) {
-                        db.messageDao().deleteById(refId)
+                        db.messageDao().deleteById(refId!!)
                     }
                 }
                 else -> {
