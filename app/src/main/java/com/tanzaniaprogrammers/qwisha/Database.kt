@@ -51,9 +51,27 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun messageDao(): MessageDao
 
     companion object {
+        @Volatile
+        private var INSTANCE: AppDatabase? = null
+
         // Migration from version 1 to 2: add hasOverlayHeader column
         val MIGRATION_1_2 = androidx.room.migration.Migration(1, 2) {
             it.execSQL("ALTER TABLE Message ADD COLUMN hasOverlayHeader INTEGER NOT NULL DEFAULT 0")
+        }
+
+        fun getDatabase(context: android.content.Context): AppDatabase {
+            return INSTANCE ?: synchronized(this) {
+                val instance = Room.databaseBuilder(
+                    context.applicationContext,
+                    AppDatabase::class.java,
+                    "sms_overlay_db"
+                )
+                    .addMigrations(MIGRATION_1_2)
+                    .fallbackToDestructiveMigration()
+                    .build()
+                INSTANCE = instance
+                instance
+            }
         }
     }
 }

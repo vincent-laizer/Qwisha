@@ -53,5 +53,14 @@
             </intent-filter>
         </receiver>
 
+        <!-- Mark as Read BroadcastReceiver -->
+        <receiver
+            android:name=".MarkReadReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="MARK_AS_READ" />
+            </intent-filter>
+        </receiver>
+
     </application>
 </manifest>

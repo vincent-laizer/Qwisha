@@ -23,8 +23,6 @@ import androidx.lifecycle.lifecycleScope
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import androidx.room.Room
-import com.tanzaniaprogrammers.qwisha.ui.theme.QwishaTheme
 import com.tanzaniaprogrammers.qwisha.ui.theme.SmsOverlayTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -39,9 +37,7 @@ class MainActivity : ComponentActivity() {
     @RequiresApi(Build.VERSION_CODES.O)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        db = Room.databaseBuilder(applicationContext, AppDatabase::class.java, "sms_overlay_db")
-            .addMigrations(AppDatabase.MIGRATION_1_2)
-            .build()
+        db = AppDatabase.getDatabase(applicationContext)
 
         // Create notification channel
         createNotificationChannel()

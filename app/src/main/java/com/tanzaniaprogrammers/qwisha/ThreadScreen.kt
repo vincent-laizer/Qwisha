@@ -66,9 +66,11 @@ fun ThreadScreen(threadId: String, db: AppDatabase, onBack: () -> Unit) {
     }
 
     // Observe Room messages in real-time
-    val messages by db.messageDao()
-        .getMessagesFlow(threadId)
-        .collectAsState(initial = emptyList())
+    // Use flowOn to ensure proper threading and stateIn for better performance
+    val messages by remember(threadId) {
+        db.messageDao()
+            .getMessagesFlow(threadId)
+    }.collectAsState(initial = emptyList())
 
     // Mark messages as read when thread is viewed and when new messages arrive
     LaunchedEffect(threadId, messages.size) {

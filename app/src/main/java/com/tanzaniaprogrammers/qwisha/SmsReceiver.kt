@@ -12,7 +12,6 @@ import android.provider.ContactsContract
 import android.telephony.SmsMessage
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import androidx.room.Room
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -56,16 +55,11 @@ class SmsReceiver : BroadcastReceiver() {
                     // Process SMS in background
                     scope.launch {
                         try {
-                            val db = Room.databaseBuilder(
-                                context.applicationContext,
-                                AppDatabase::class.java,
-                                "sms_overlay_db"
-                            )
-                                .addMigrations(AppDatabase.MIGRATION_1_2)
-                                .build()
-
+                            // Use singleton database instance to ensure Flow observers are notified
+                            val db = AppDatabase.getDatabase(context.applicationContext)
                             processSms(context, db, sender, body)
-                            db.close()
+                            // Database instance is managed by singleton - no need to close
+                            // This ensures all Flow observers (including in MainActivity) get updates
                         } catch (e: Exception) {
                             Log.e("SmsReceiver", "Error processing SMS: ${e.message}", e)
                             e.printStackTrace()
@@ -165,22 +159,22 @@ class SmsReceiver : BroadcastReceiver() {
             when (cmd) {
                 "s" -> { // send
                     Log.d("SmsReceiver", "Inserting send message: msgId=$msgId")
-                    val message = Message(msgId!!, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
+                    val message = Message(msgId, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
                     db.messageDao().insert(message)
                     val contactName = getContactName(context, sender)
-                    showNotification(context, contactName, content, msgId!!, sender)
+                    showNotification(context, contactName, content, msgId, sender)
                 }
                 "r" -> { // reply
                     Log.d("SmsReceiver", "Inserting reply message: msgId=$msgId, refId=$refId")
-                    val message = Message(msgId!!, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
+                    val message = Message(msgId, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
                     db.messageDao().insert(message)
                     val contactName = getContactName(context, sender)
-                    showNotification(context, contactName, content, msgId!!, sender)
+                    showNotification(context, contactName, content, msgId, sender)
                 }
                 "e" -> { // edit
                     Log.d("SmsReceiver", "Updating message content: refId=$refId")
                     if (refId != null) {
-                        db.messageDao().updateContent(refId!!, content)
+                        db.messageDao().updateContent(refId, content)
                     } else {
                         Log.e("SmsReceiver", "Edit command missing refId")
                     }
@@ -188,7 +182,7 @@ class SmsReceiver : BroadcastReceiver() {
                 "d" -> { // delete
                     Log.d("SmsReceiver", "Deleting message: refId=$refId")
                     if (refId != null) {
-                        db.messageDao().deleteById(refId!!)
+                        db.messageDao().deleteById(refId)
                     } else {
                         Log.e("SmsReceiver", "Delete command missing refId")
                     }
@@ -196,28 +190,28 @@ class SmsReceiver : BroadcastReceiver() {
                 // Support old format for backward compatibility
                 "send", "normal" -> {
                     Log.d("SmsReceiver", "Inserting send message (old format): msgId=$msgId")
-                    val message = Message(msgId!!, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
+                    val message = Message(msgId, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
                     db.messageDao().insert(message)
                     val contactName = getContactName(context, sender)
-                    showNotification(context, contactName, content, msgId!!, sender)
+                    showNotification(context, contactName, content, msgId, sender)
                 }
                 "reply" -> {
                     Log.d("SmsReceiver", "Inserting reply message (old format): msgId=$msgId")
-                    val message = Message(msgId!!, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
+                    val message = Message(msgId, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
                     db.messageDao().insert(message)
                     val contactName = getContactName(context, sender)
-                    showNotification(context, contactName, content, msgId!!, sender)
+                    showNotification(context, contactName, content, msgId, sender)
                 }
                 "edit" -> {
                     Log.d("SmsReceiver", "Updating message content (old format): refId=$refId")
                     if (refId != null) {
-                        db.messageDao().updateContent(refId!!, content)
+                        db.messageDao().updateContent(refId, content)
                     }
                 }
                 "delete" -> {
                     Log.d("SmsReceiver", "Deleting message (old format): refId=$refId")
                     if (refId != null) {
-                        db.messageDao().deleteById(refId!!)
+                        db.messageDao().deleteById(refId)
                     }
                 }
                 else -> {
@@ -318,7 +312,7 @@ class SmsReceiver : BroadcastReceiver() {
             val pendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 PendingIntent.getActivity(
                     context,
-                    msgId.hashCode(),
+                    phoneNumber.hashCode(),
                     intent,
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 )
@@ -326,8 +320,31 @@ class SmsReceiver : BroadcastReceiver() {
                 @Suppress("DEPRECATION")
                 PendingIntent.getActivity(
                     context,
-                    msgId.hashCode(),
+                    phoneNumber.hashCode(),
                     intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT
+                )
+            }
+
+            // Create intent for "Mark as Read" action
+            val markReadIntent = Intent(context, MarkReadReceiver::class.java).apply {
+                action = "MARK_AS_READ"
+                putExtra("threadId", phoneNumber)
+                putExtra("notificationId", phoneNumber.hashCode())
+            }
+            val markReadPendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.getBroadcast(
+                    context,
+                    phoneNumber.hashCode() + 1000,
+                    markReadIntent,
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                PendingIntent.getBroadcast(
+                    context,
+                    phoneNumber.hashCode() + 1000,
+                    markReadIntent,
                     PendingIntent.FLAG_UPDATE_CURRENT
                 )
             }
@@ -339,6 +356,11 @@ class SmsReceiver : BroadcastReceiver() {
                 .setStyle(NotificationCompat.BigTextStyle().bigText(content))
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setContentIntent(pendingIntent)
+                .addAction(
+                    android.R.drawable.ic_menu_view,
+                    "Mark as Read",
+                    markReadPendingIntent
+                )
                 .setAutoCancel(true)
                 .setDefaults(NotificationCompat.DEFAULT_ALL)
                 .build()
@@ -353,7 +375,7 @@ class SmsReceiver : BroadcastReceiver() {
                 }
             }
 
-            notificationManager.notify(msgId.hashCode(), notification)
+            notificationManager.notify(phoneNumber.hashCode(), notification)
             Log.d("SmsReceiver", "Notification shown successfully")
         } catch (e: Exception) {
             Log.e("SmsReceiver", "Error showing notification: ${e.message}", e)

@@ -33,11 +33,14 @@ fun ConversationsScreen(navController: NavHostController, db: AppDatabase) {
     var showNewMessageDialog by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
-    val messages by if (query.isNotBlank()) {
-        db.messageDao().searchMessagesFlow(query).collectAsState(initial = emptyList())
-    } else {
-        db.messageDao().getAllMessagesFlow().collectAsState(initial = emptyList())
-    }
+    // Observe messages with proper Flow handling for real-time updates
+    val messages by remember(query) {
+        if (query.isNotBlank()) {
+            db.messageDao().searchMessagesFlow(query)
+        } else {
+            db.messageDao().getAllMessagesFlow()
+        }
+    }.collectAsState(initial = emptyList())
 
     // Load contact names for thread IDs
     val contactNames = remember { mutableStateMapOf<String, String>() }
