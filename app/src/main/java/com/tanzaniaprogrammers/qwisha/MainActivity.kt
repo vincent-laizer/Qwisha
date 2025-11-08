@@ -161,6 +161,7 @@ class MainActivity : ComponentActivity() {
                             val threadId = backStackEntry.arguments?.getString("threadId") ?: ""
                             ThreadScreen(threadId, db) { navController.popBackStack() }
                         }
+                        composable("settings") { SettingsScreen(navController) }
                     }
                 }
             }
@@ -261,10 +262,17 @@ fun ThreadScreen(threadId: String, db: AppDatabase, onBack: () -> Unit) {
     var showMenu by remember { mutableStateOf(false) }
     var selectedMsg by remember { mutableStateOf<Message?>(null) }
     var sendingMessage by remember { mutableStateOf(false) }
+    var useOverlayHeader by remember { mutableStateOf(true) }
 
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
+
+    // Load contact name
+    var contactName by remember { mutableStateOf(threadId) }
+    LaunchedEffect(threadId) {
+        contactName = getContactName(context, threadId)
+    }
 
     // Observe Room messages in real-time
     val messages by db.messageDao()
@@ -280,29 +288,37 @@ fun ThreadScreen(threadId: String, db: AppDatabase, onBack: () -> Unit) {
         if (inputText.isBlank() || sendingMessage) return
 
         sendingMessage = true
-        // Always generate a new message ID for the SMS being sent (5 characters)
         val msgId = generateShortId()
+        val smsBody: String
+        val hasOverlay: Boolean
 
-        // Build compact header: @i=<MSGID>;c=<CMD>;r=<REFID> content
-        // Commands: s=send, r=reply, e=edit, d=delete
-        val cmd = when {
-            editingMsgId != null -> "e"
-            replyToMsg != null -> "r"
-            else -> "s"
-        }
-        val refId = when {
-            editingMsgId != null -> editingMsgId  // Original message ID being edited
-            replyToMsg != null -> replyToMsg?.id  // Message being replied to
-            else -> null
-        }
-
-        val header = buildString {
-            append("@i=$msgId;c=$cmd")
-            if (refId != null) {
-                append(";r=$refId")
+        if (useOverlayHeader) {
+            // Build compact header: @i=<MSGID>;c=<CMD>;r=<REFID> content
+            // Commands: s=send, r=reply, e=edit, d=delete
+            val cmd = when {
+                editingMsgId != null -> "e"
+                replyToMsg != null -> "r"
+                else -> "s"
             }
+            val refId = when {
+                editingMsgId != null -> editingMsgId  // Original message ID being edited
+                replyToMsg != null -> replyToMsg?.id  // Message being replied to
+                else -> null
+            }
+
+            val header = buildString {
+                append("@i=$msgId;c=$cmd")
+                if (refId != null) {
+                    append(";r=$refId")
+                }
+            }
+            smsBody = "$header $inputText"
+            hasOverlay = true
+        } else {
+            // Send as regular SMS without overlay header
+            smsBody = inputText
+            hasOverlay = false
         }
-        val smsBody = "$header $inputText"
 
         // Send SMS with delivery report
         scope.launch {
@@ -335,7 +351,7 @@ fun ThreadScreen(threadId: String, db: AppDatabase, onBack: () -> Unit) {
                     // Update existing message
                     db.messageDao().updateContent(editingMsgId!!, inputText)
                 } else {
-                    // Insert new message (always has overlay header since we send it)
+                    // Insert new message
                     val newMsg = Message(
                         msgId,
                         threadId,
@@ -344,7 +360,7 @@ fun ThreadScreen(threadId: String, db: AppDatabase, onBack: () -> Unit) {
                         replyToMsg?.id,
                         "sent",
                         System.currentTimeMillis(),
-                        hasOverlayHeader = true
+                        hasOverlayHeader = hasOverlay
                     )
                     db.messageDao().insert(newMsg)
                 }
@@ -367,8 +383,8 @@ fun ThreadScreen(threadId: String, db: AppDatabase, onBack: () -> Unit) {
             TopAppBar(
                 title = {
                     Column {
-                        Text(threadId, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                        Text("Tap to view contact", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                        Text(contactName, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        Text(threadId, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
                     }
                 },
                 navigationIcon = {
@@ -376,10 +392,21 @@ fun ThreadScreen(threadId: String, db: AppDatabase, onBack: () -> Unit) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Back")
                     }
                 },
+                actions = {
+                    // Toggle overlay header option
+                    IconButton(onClick = { useOverlayHeader = !useOverlayHeader }) {
+                        Icon(
+                            if (useOverlayHeader) Icons.Default.Star else Icons.Default.Email,
+                            contentDescription = if (useOverlayHeader) "Using overlay headers" else "Sending as regular SMS",
+                            tint = if (useOverlayHeader) Color.White else Color.White.copy(alpha = 0.7f)
+                        )
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primary,
                     titleContentColor = Color.White,
-                    navigationIconContentColor = Color.White
+                    navigationIconContentColor = Color.White,
+                    actionIconContentColor = Color.White
                 )
             )
         },
@@ -481,10 +508,12 @@ fun ThreadScreen(threadId: String, db: AppDatabase, onBack: () -> Unit) {
                             value = inputText,
                             onValueChange = { inputText = it },
                             placeholder = { Text("Type a message...") },
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp, max = 120.dp),
                             shape = RoundedCornerShape(24.dp),
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                            keyboardActions = KeyboardActions(onSend = { sendMessage() }),
+                            maxLines = 5,
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedBorderColor = MaterialTheme.colorScheme.primary,
                                 unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
@@ -743,13 +772,33 @@ fun EmptyThreadState() {
 @Composable
 fun ConversationsScreen(navController: NavHostController, db: AppDatabase) {
     var query by remember { mutableStateOf("") }
-    var showSearch by remember { mutableStateOf(false) }
     var showNewMessageDialog by remember { mutableStateOf(false) }
+    val context = LocalContext.current
 
     val messages by if (query.isNotBlank()) {
         db.messageDao().searchMessagesFlow(query).collectAsState(initial = emptyList())
     } else {
         db.messageDao().getAllMessagesFlow().collectAsState(initial = emptyList())
+    }
+
+    // Load contact names for thread IDs
+    val contactNames = remember { mutableStateMapOf<String, String>() }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(messages.map { it.threadId }.distinct().joinToString()) {
+        val uniqueThreadIds = messages.map { it.threadId }.distinct()
+        uniqueThreadIds.forEach { threadId ->
+            if (!contactNames.containsKey(threadId)) {
+                scope.launch {
+                    try {
+                        val name = getContactName(context, threadId)
+                        contactNames[threadId] = name
+                    } catch (e: Exception) {
+                        contactNames[threadId] = threadId
+                    }
+                }
+            }
+        }
     }
 
     // Create thread summaries from messages
@@ -759,7 +808,7 @@ fun ConversationsScreen(navController: NavHostController, db: AppDatabase) {
             val lastMsg = msgs.maxByOrNull { it.timestamp }
             ThreadSummary(
                 threadId = threadId,
-                contactName = threadId,
+                contactName = contactNames[threadId] ?: threadId,
                 snippet = lastMsg?.content ?: "",
                 lastAtEpoch = lastMsg?.timestamp ?: 0L,
                 unread = msgs.count { !it.outgoing && it.status != "read" }
@@ -772,8 +821,8 @@ fun ConversationsScreen(navController: NavHostController, db: AppDatabase) {
             TopAppBar(
                 title = { Text("Qwisha", fontWeight = FontWeight.Bold) },
                 actions = {
-                    IconButton(onClick = { showSearch = !showSearch }) {
-                        Icon(Icons.Default.Search, contentDescription = "Search")
+                    IconButton(onClick = { navController.navigate("settings") }) {
+                        Icon(Icons.Default.Settings, contentDescription = "Settings")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -794,32 +843,26 @@ fun ConversationsScreen(navController: NavHostController, db: AppDatabase) {
         }
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-            // Search bar
-            AnimatedVisibility(
-                visible = showSearch,
-                enter = expandVertically() + fadeIn(),
-                exit = shrinkVertically() + fadeOut()
-            ) {
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    placeholder = { Text("Search messages or contacts") },
-                    singleLine = true,
-                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                    trailingIcon = {
-                        if (query.isNotEmpty()) {
-                            IconButton(onClick = { query = "" }) {
-                                Icon(Icons.Default.Close, contentDescription = "Clear")
-                            }
+            // Search bar - always visible
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                placeholder = { Text("Search messages") },
+                singleLine = true,
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                trailingIcon = {
+                    if (query.isNotEmpty()) {
+                        IconButton(onClick = { query = "" }) {
+                            Icon(Icons.Default.Close, contentDescription = "Clear")
                         }
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    shape = RoundedCornerShape(24.dp),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search)
-                )
-            }
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                shape = RoundedCornerShape(24.dp),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search)
+            )
 
             if (threadSummaries.isEmpty()) {
                 EmptyState(modifier = Modifier.fillMaxSize())
@@ -1181,6 +1224,65 @@ suspend fun loadContacts(context: Context): List<Contact> = withContext(Dispatch
     contacts.distinctBy { it.phoneNumber }
 }
 
+// Get contact name from phone number
+suspend fun getContactName(context: Context, phoneNumber: String): String = withContext(Dispatchers.IO) {
+    try {
+        val uri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
+        val projection = arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+        val selection = "${ContactsContract.CommonDataKinds.Phone.NUMBER} = ?"
+        val selectionArgs = arrayOf(phoneNumber)
+
+        context.contentResolver.query(uri, projection, selection, selectionArgs, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val nameIndex = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+                val name = cursor.getString(nameIndex)
+                if (!name.isNullOrBlank()) {
+                    return@withContext name
+                }
+            }
+        }
+
+        // Try with cleaned number (without formatting)
+        val cleanNumber = phoneNumber.replace(Regex("[^+0-9]"), "")
+        context.contentResolver.query(uri, projection, selection, arrayOf(cleanNumber), null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val nameIndex = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+                val name = cursor.getString(nameIndex)
+                if (!name.isNullOrBlank()) {
+                    return@withContext name
+                }
+            }
+        }
+
+        // Try matching by number ending (for cases where country code differs)
+        val numberSuffix = cleanNumber.takeLast(9) // Last 9 digits
+        context.contentResolver.query(
+            uri,
+            arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER),
+            null,
+            null,
+            null
+        )?.use { cursor ->
+            val nameIndex = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+            val numberIndex = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+
+            while (cursor.moveToNext()) {
+                val number = cursor.getString(numberIndex) ?: ""
+                val cleanStoredNumber = number.replace(Regex("[^+0-9]"), "")
+                if (cleanStoredNumber.endsWith(numberSuffix) && numberSuffix.length >= 7) {
+                    val name = cursor.getString(nameIndex)
+                    if (!name.isNullOrBlank()) {
+                        return@withContext name
+                    }
+                }
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    phoneNumber // Return phone number if contact not found
+}
+
 @RequiresApi(Build.VERSION_CODES.O)
 fun formatTime(timestamp: Long): String {
     val now = Instant.now()
@@ -1206,6 +1308,176 @@ fun formatTime(timestamp: Long): String {
         else -> {
             // Different year: show full date
             DateTimeFormatter.ofPattern("MMM d, yyyy").format(msgTime.atZone(zone))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@RequiresApi(Build.VERSION_CODES.O)
+@Composable
+fun SettingsScreen(navController: NavHostController) {
+    val context = LocalContext.current
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Settings", fontWeight = FontWeight.Bold) },
+                navigationIcon = {
+                    IconButton(onClick = { navController.popBackStack() }) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    titleContentColor = Color.White,
+                    navigationIconContentColor = Color.White
+                )
+            )
+        }
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(16.dp)
+        ) {
+            item {
+                Text(
+                    "About",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(vertical = 16.dp)
+                )
+            }
+
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 16.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp)
+                    ) {
+                        Text(
+                            "Developed by",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "Vicent Laizer",
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
+
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 16.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    try {
+                                        val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://tanzaniaprogrammers.com"))
+                                        context.startActivity(intent)
+                                    } catch (e: Exception) {
+                                        e.printStackTrace()
+                                    }
+                                }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Info,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(16.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "TanzaniaProgrammers.com",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    "Visit our website",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                )
+                            }
+                            Icon(
+                                Icons.Default.ExitToApp,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                            )
+                        }
+                    }
+                }
+            }
+
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 16.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    // Placeholder for "How it works" page
+                                    // You can implement this later
+                                }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Info,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(16.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "How it works",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    "Learn about Qwisha",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                )
+                            }
+                            Icon(
+                                Icons.Default.ExitToApp,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }
