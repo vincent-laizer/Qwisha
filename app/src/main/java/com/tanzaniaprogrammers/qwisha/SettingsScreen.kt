@@ -70,7 +70,7 @@ fun SettingsScreen(navController: NavHostController) {
                         modifier = Modifier.padding(16.dp)
                     ) {
                         Text(
-                            "Qwisha is a revolutionary SMS messaging app that extends traditional SMS capabilities with advanced features not typically available in standard messaging apps. Unlike regular SMS apps, Qwisha enables you to edit messages after sending, delete messages from both sides of the conversation, reply to specific messages with context, and search through your message history—all while working completely offline via standard SMS protocols. These features are made possible through a compact overlay protocol that embeds metadata in your messages, allowing you to enjoy modern messaging features without requiring internet connectivity or relying on third-party services.",
+                            "Qwisha is a revolutionary SMS messaging app that extends traditional SMS capabilities with advanced features not typically available in standard messaging apps. Unlike regular SMS apps, Qwisha enables you to edit messages after sending, delete messages from both sides of the conversation, reply to specific messages with context, and search through your message history—all while working completely offline via standard SMS protocols. These features are made possible through the Qwisha protocol, allowing you to enjoy modern messaging features without requiring internet connectivity or relying on third-party services.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
                             lineHeight = 20.sp
@@ -119,7 +119,7 @@ fun SettingsScreen(navController: NavHostController) {
                                 .fillMaxWidth()
                                 .clickable {
                                     try {
-                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://tanzaniaprogrammers.com"))
+                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://tanzaniaprogrammers.com/qwisha/index.html"))
                                         context.startActivity(intent)
                                     } catch (e: Exception) {
                                         e.printStackTrace()
@@ -137,7 +137,7 @@ fun SettingsScreen(navController: NavHostController) {
                             Spacer(modifier = Modifier.width(16.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    "TanzaniaProgrammers.com",
+                                    "Qwisha",
                                     style = MaterialTheme.typography.bodyLarge,
                                     fontWeight = FontWeight.Medium,
                                     color = MaterialTheme.colorScheme.primary
@@ -172,8 +172,12 @@ fun SettingsScreen(navController: NavHostController) {
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    // Placeholder for "How it works" page
-                                    // You can implement this later
+                                    try {
+                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://tanzaniaprogrammers.com/qwisha/protocol.html"))
+                                        context.startActivity(intent)
+                                    } catch (e: Exception) {
+                                        e.printStackTrace()
+                                    }
                                 }
                                 .padding(vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -193,7 +197,7 @@ fun SettingsScreen(navController: NavHostController) {
                                     color = MaterialTheme.colorScheme.primary
                                 )
                                 Text(
-                                    "Learn about Qwisha",
+                                    "Learn about Qwisha protocol",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                                 )
