@@ -749,7 +749,8 @@ fun ThreadScreen(threadId: String, db: AppDatabase, onBack: () -> Unit) {
                         } else {
                             // Not recording: Show mic button and text input
                             // Microphone button for voice notes (only if overlay header is enabled)
-                            if (useOverlayHeader) {
+                            //  if (useOverlayHeader) {
+                            if (false) {
                                 IconButton(
                                     onClick = { startRecording() },
                                     enabled = !sendingMessage && inputText.isBlank()
@@ -764,7 +765,7 @@ fun ThreadScreen(threadId: String, db: AppDatabase, onBack: () -> Unit) {
                             OutlinedTextField(
                                 value = inputText,
                                 onValueChange = { inputText = it },
-                                placeholder = { Text(if (useOverlayHeader) "Type a message or record voice note..." else "Type a message...") },
+                                placeholder = { Text("Message") },
                                 modifier = Modifier
                                     .weight(1f)
                                     .heightIn(min = 48.dp, max = 120.dp),
