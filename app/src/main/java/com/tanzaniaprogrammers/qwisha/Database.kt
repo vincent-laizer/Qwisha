@@ -12,7 +12,9 @@ data class Message(
     val replyTo: String?,
     val status: String,
     val timestamp: Long,
-    val hasOverlayHeader: Boolean = false  // True if message was sent/received with overlay protocol header
+    val hasOverlayHeader: Boolean = false,  // True if message was sent/received with overlay protocol header
+    val messageType: String = "text",  // "text" or "voice"
+    val audioFilePath: String? = null  // Path to audio file for voice messages
 )
 
 @Dao
@@ -46,7 +48,7 @@ interface MessageDao {
     fun searchMessagesFlow(query: String): Flow<List<Message>>
 }
 
-@Database(entities = [Message::class], version = 2)
+@Database(entities = [Message::class], version = 3)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun messageDao(): MessageDao
 
@@ -59,6 +61,12 @@ abstract class AppDatabase : RoomDatabase() {
             it.execSQL("ALTER TABLE Message ADD COLUMN hasOverlayHeader INTEGER NOT NULL DEFAULT 0")
         }
 
+        // Migration from version 2 to 3: add messageType and audioFilePath columns
+        val MIGRATION_2_3 = androidx.room.migration.Migration(2, 3) {
+            it.execSQL("ALTER TABLE Message ADD COLUMN messageType TEXT NOT NULL DEFAULT 'text'")
+            it.execSQL("ALTER TABLE Message ADD COLUMN audioFilePath TEXT")
+        }
+
         fun getDatabase(context: android.content.Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -66,7 +74,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "sms_overlay_db"
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .fallbackToDestructiveMigration()
                     .build()
                 INSTANCE = instance

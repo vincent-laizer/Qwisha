@@ -87,7 +87,7 @@ class SmsReceiver : BroadcastReceiver() {
         try {
             Log.d("SmsReceiver", "Processing SMS from $sender: body length=${body.length}, starts with @=${body.startsWith("@")}")
 
-            // Parse compact header format: @i=<MSGID>;c=<CMD>;r=<REFID> content
+            // Parse compact header format: @i=<MSGID>;c=<CMD>;r=<REFID>;p=<PART>/<TOTAL> content
             if (!body.startsWith("@")) {
                 // Regular SMS without overlay header - treat as normal message
                 Log.d("SmsReceiver", "Regular SMS (no overlay header)")
@@ -139,6 +139,8 @@ class SmsReceiver : BroadcastReceiver() {
             var msgId: String? = null
             var cmd: String? = null
             var refId: String? = null
+            var messagePart: String? = null // Format: "partNumber/totalParts"
+            var messageType: String? = null // Message type: "voice" or null (text)
 
             header.split(";").forEach { part ->
                 val keyValue = part.split("=", limit = 2)
@@ -147,11 +149,13 @@ class SmsReceiver : BroadcastReceiver() {
                         "i" -> msgId = keyValue[1]
                         "c" -> cmd = keyValue[1]
                         "r" -> refId = if (keyValue[1] == "null" || keyValue[1].isEmpty()) null else keyValue[1]
+                        "p" -> messagePart = keyValue[1] // message_part parameter
+                        "t" -> messageType = keyValue[1] // message type parameter
                     }
                 }
             }
 
-            Log.d("SmsReceiver", "Parsed: msgId=$msgId, cmd=$cmd, refId=$refId")
+            Log.d("SmsReceiver", "Parsed: msgId=$msgId, cmd=$cmd, refId=$refId, part=$messagePart")
 
             if (msgId == null || cmd == null) {
                 Log.e("SmsReceiver", "Missing required fields: msgId=$msgId, cmd=$cmd, header='$header', full body='$body'")
@@ -164,25 +168,106 @@ class SmsReceiver : BroadcastReceiver() {
                 return
             }
 
+            // Handle multi-part messages
+            if (messagePart != null) {
+                val partParts = messagePart!!.split("/")
+                if (partParts.size == 2) {
+                    val partNumber = partParts[0].toIntOrNull()
+                    val totalParts = partParts[1].toIntOrNull()
+
+                    if (partNumber != null && totalParts != null) {
+                        Log.d("SmsReceiver", "Processing multi-part message: part $partNumber/$totalParts")
+                        val completeContent = MultiPartMessageManager.addPart(msgId!!, partNumber, totalParts, content)
+
+                        if (completeContent != null) {
+                            // All parts received, process the complete message
+                            Log.d("SmsReceiver", "All parts received for message $msgId, processing complete message")
+                            processCompleteMessage(context, db, sender,
+                                msgId!!, cmd!!, refId, completeContent, messageType)
+                        } else {
+                            // Waiting for more parts
+                            Log.d("SmsReceiver", "Waiting for more parts for message $msgId")
+                        }
+                        return
+                    }
+                }
+            }
+
+            // Single-part message, process directly
+            processCompleteMessage(context, db, sender, msgId!!, cmd!!, refId, content, messageType)
+        } catch (e: Exception) {
+            Log.e("SmsReceiver", "Error parsing SMS: ${e.message}", e)
+            e.printStackTrace()
+        }
+    }
+
+    private suspend fun processCompleteMessage(
+        context: Context,
+        db: AppDatabase,
+        sender: String,
+        msgId: String,
+        cmd: String,
+        refId: String?,
+        content: String,
+        messageTypeHeader: String? = null
+    ) {
+        try {
+            // Check if this is a voice message (from header or content detection)
+            val isVoiceMessage = messageTypeHeader == "voice" ||
+                    (content.length > 500 &&
+                            content.matches(Regex("^[A-Za-z0-9+/=]+$")) &&
+                            !content.contains(" ")) // Base64 pattern
+
+            var messageType = if (isVoiceMessage) "voice" else "text"
+            var audioFilePath: String? = null
+            var displayContent = content
+
+            if (isVoiceMessage) {
+                // Decode and save audio
+                Log.d("SmsReceiver", "Processing voice message, decoding base64 audio...")
+                audioFilePath = AudioUtils.decodeAndSaveAudio(context, content, msgId)
+                if (audioFilePath != null) {
+                    messageType = "voice"
+                    displayContent = "🎤 Voice message" // Display text for voice messages
+                    Log.d("SmsReceiver", "Audio decoded and saved: $audioFilePath")
+                } else {
+                    Log.e("SmsReceiver", "Failed to decode audio, treating as text")
+                    messageType = "text"
+                }
+            }
+
             when (cmd) {
                 "s" -> { // send
-                    Log.d("SmsReceiver", "Inserting send message: msgId=$msgId")
-                    val message = Message(msgId!!, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
+                    Log.d("SmsReceiver", "Inserting send message: msgId=$msgId, type=$messageType")
+                    val message = Message(
+                        msgId, sender, displayContent, false, refId, "delivered",
+                        System.currentTimeMillis(), hasOverlayHeader = true,
+                        messageType = messageType, audioFilePath = audioFilePath
+                    )
                     db.messageDao().insert(message)
                     val contactName = getContactName(context, sender)
-                    showNotification(context, contactName, content, msgId!!, sender)
+                    showNotification(context, contactName, displayContent, msgId, sender)
                 }
                 "r" -> { // reply
-                    Log.d("SmsReceiver", "Inserting reply message: msgId=$msgId, refId=$refId")
-                    val message = Message(msgId!!, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
+                    Log.d("SmsReceiver", "Inserting reply message: msgId=$msgId, refId=$refId, type=$messageType")
+                    val message = Message(
+                        msgId, sender, displayContent, false, refId, "delivered",
+                        System.currentTimeMillis(), hasOverlayHeader = true,
+                        messageType = messageType, audioFilePath = audioFilePath
+                    )
                     db.messageDao().insert(message)
                     val contactName = getContactName(context, sender)
-                    showNotification(context, contactName, content, msgId!!, sender)
+                    showNotification(context, contactName, displayContent, msgId, sender)
                 }
                 "e" -> { // edit
                     Log.d("SmsReceiver", "Updating message content: refId=$refId")
                     if (refId != null) {
-                        db.messageDao().updateContent(refId!!, content)
+                        db.messageDao().updateContent(refId, displayContent)
+                        // Also update audio file if it's a voice message
+                        if (audioFilePath != null) {
+                            // Note: We would need a new DAO method to update audioFilePath
+                            // For now, we'll just update the content
+                        }
                     } else {
                         Log.e("SmsReceiver", "Edit command missing refId")
                     }
@@ -190,7 +275,7 @@ class SmsReceiver : BroadcastReceiver() {
                 "d" -> { // delete
                     Log.d("SmsReceiver", "Deleting message: refId=$refId")
                     if (refId != null) {
-                        db.messageDao().deleteById(refId!!)
+                        db.messageDao().deleteById(refId)
                     } else {
                         Log.e("SmsReceiver", "Delete command missing refId")
                     }
@@ -198,28 +283,36 @@ class SmsReceiver : BroadcastReceiver() {
                 // Support old format for backward compatibility
                 "send", "normal" -> {
                     Log.d("SmsReceiver", "Inserting send message (old format): msgId=$msgId")
-                    val message = Message(msgId!!, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
+                    val message = Message(
+                        msgId, sender, displayContent, false, refId, "delivered",
+                        System.currentTimeMillis(), hasOverlayHeader = true,
+                        messageType = messageType, audioFilePath = audioFilePath
+                    )
                     db.messageDao().insert(message)
                     val contactName = getContactName(context, sender)
-                    showNotification(context, contactName, content, msgId!!, sender)
+                    showNotification(context, contactName, displayContent, msgId, sender)
                 }
                 "reply" -> {
                     Log.d("SmsReceiver", "Inserting reply message (old format): msgId=$msgId")
-                    val message = Message(msgId!!, sender, content, false, refId, "delivered", System.currentTimeMillis(), hasOverlayHeader = true)
+                    val message = Message(
+                        msgId, sender, displayContent, false, refId, "delivered",
+                        System.currentTimeMillis(), hasOverlayHeader = true,
+                        messageType = messageType, audioFilePath = audioFilePath
+                    )
                     db.messageDao().insert(message)
                     val contactName = getContactName(context, sender)
-                    showNotification(context, contactName, content, msgId!!, sender)
+                    showNotification(context, contactName, displayContent, msgId, sender)
                 }
                 "edit" -> {
                     Log.d("SmsReceiver", "Updating message content (old format): refId=$refId")
                     if (refId != null) {
-                        db.messageDao().updateContent(refId!!, content)
+                        db.messageDao().updateContent(refId, displayContent)
                     }
                 }
                 "delete" -> {
                     Log.d("SmsReceiver", "Deleting message (old format): refId=$refId")
                     if (refId != null) {
-                        db.messageDao().deleteById(refId!!)
+                        db.messageDao().deleteById(refId)
                     }
                 }
                 else -> {
@@ -227,7 +320,7 @@ class SmsReceiver : BroadcastReceiver() {
                 }
             }
         } catch (e: Exception) {
-            Log.e("SmsReceiver", "Error parsing SMS: ${e.message}", e)
+            Log.e("SmsReceiver", "Error processing complete message: ${e.message}", e)
             e.printStackTrace()
         }
     }

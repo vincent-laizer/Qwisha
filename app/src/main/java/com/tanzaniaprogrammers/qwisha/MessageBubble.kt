@@ -3,8 +3,12 @@ package com.tanzaniaprogrammers.qwisha
 import android.content.ClipboardManager
 import android.content.ClipData
 import android.content.Context
+import android.media.MediaPlayer
 import android.os.Build
 import androidx.annotation.RequiresApi
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -13,7 +17,9 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -32,7 +38,56 @@ fun MessageBubble(
     onCopy: (Message) -> Unit = {}
 ) {
     var showMenu by remember { mutableStateOf(false) }
+    var isPlaying by remember { mutableStateOf(false) }
+    var mediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
+    var playbackPosition by remember { mutableStateOf(0) }
+    var audioDuration by remember { mutableStateOf(0) }
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    // Load audio duration when message is a voice note
+    LaunchedEffect(message.id, message.messageType, message.audioFilePath) {
+        if (message.messageType == "voice" && message.audioFilePath != null) {
+            audioDuration = AudioUtils.getAudioDuration(message.audioFilePath!!)
+        }
+    }
+
+    // Cleanup media player when component is disposed
+    DisposableEffect(Unit) {
+        onDispose {
+            mediaPlayer?.release()
+            mediaPlayer = null
+        }
+    }
+
+    fun togglePlayback() {
+        if (message.messageType != "voice" || message.audioFilePath == null) return
+
+        scope.launch {
+            if (isPlaying) {
+                // Stop playback
+                mediaPlayer?.stop()
+                mediaPlayer?.release()
+                mediaPlayer = null
+                isPlaying = false
+                playbackPosition = 0
+            } else {
+                // Start playback
+                try {
+                    val player = AudioUtils.playAudio(message.audioFilePath!!) {
+                        // On completion
+                        isPlaying = false
+                        playbackPosition = 0
+                    }
+                    mediaPlayer = player
+                    isPlaying = true
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    isPlaying = false
+                }
+            }
+        }
+    }
 
     Box(
         modifier = Modifier.fillMaxWidth(),
@@ -96,10 +151,46 @@ fun MessageBubble(
                 shadowElevation = 1.dp
             ) {
                 Column(Modifier.padding(12.dp)) {
-                    Text(
-                        message.content,
-                        color = if (message.outgoing) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    // Voice message UI
+                    if (message.messageType == "voice" && message.audioFilePath != null) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IconButton(
+                                onClick = { togglePlayback() },
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(
+                                    if (isPlaying) Icons.Default.Close else Icons.Default.PlayArrow,
+                                    contentDescription = if (isPlaying) "Pause" else "Play",
+                                    tint = if (message.outgoing) Color.White else MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "🎤 Voice message",
+                                    color = if (message.outgoing) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                if (audioDuration > 0) {
+                                    Text(
+                                        AudioUtils.formatDuration(audioDuration / 1000),
+                                        fontSize = 12.sp,
+                                        color = if (message.outgoing) Color.White.copy(alpha = 0.7f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        // Regular text message
+                        Text(
+                            message.content,
+                            color = if (message.outgoing) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                     Spacer(Modifier.height(4.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
