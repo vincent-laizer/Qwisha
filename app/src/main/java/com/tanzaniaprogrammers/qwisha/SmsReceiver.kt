@@ -23,7 +23,7 @@ class SmsReceiver : BroadcastReceiver() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == "android.provider.Telephony.SMS_RECEIVED") {
+        if (intent.action == "android.provider.Telephony.SMS_RECEIVED" || intent.action == "android.provider.Telephony.SMS_DELIVER") {
             val bundle: Bundle? = intent.extras
             try {
                 val pdus = bundle?.get("pdus") as? Array<*>

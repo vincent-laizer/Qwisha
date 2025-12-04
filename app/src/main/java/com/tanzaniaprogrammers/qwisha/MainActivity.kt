@@ -3,13 +3,16 @@ package com.tanzaniaprogrammers.qwisha
 import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.role.RoleManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import android.os.Bundle
+import android.provider.Telephony
 import android.telephony.SmsManager
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -28,11 +31,24 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+private const val TAG = "MainActivity"
 class MainActivity : ComponentActivity() {
 
     private lateinit var db: AppDatabase
     private var smsSentReceiver: BroadcastReceiver? = null
     private var smsDeliveredReceiver: BroadcastReceiver? = null
+
+    private val roleRequestLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == RESULT_OK) {
+            //permission granted
+            Log.d(TAG, "Default SMS app role granted")
+        }
+        else {
+            // permission denied
+            Log.d(TAG, "Default SMS app role not granted")
+        }
+    }
+
 
     @RequiresApi(Build.VERSION_CODES.O)
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -54,6 +70,8 @@ class MainActivity : ComponentActivity() {
             Manifest.permission.POST_NOTIFICATIONS
         ))
 
+
+        requestDefaultSmsRole()
         // Register SMS delivery receivers
         smsSentReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
@@ -144,4 +162,29 @@ class MainActivity : ComponentActivity() {
             notificationManager.createNotificationChannel(channel)
         }
     }
+
+
+    private fun requestDefaultSmsRole(){
+        Log.d(TAG, "Requesting default SMS app role")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q){
+            val roleManager = getSystemService(RoleManager::class.java)
+            //check if teh role is available and if we dont already have it
+
+            if (roleManager.isRoleAvailable(RoleManager.ROLE_SMS) && !roleManager.isRoleHeld(RoleManager.ROLE_SMS)){
+                val intent = roleManager.createRequestRoleIntent(RoleManager.ROLE_SMS)
+                roleRequestLauncher.launch(intent)
+                Log.d(TAG, "Default SMS app role requested")
+            }
+        } else {
+            //fallback for older Android versions
+            if (Telephony.Sms.getDefaultSmsPackage(this) != packageName){
+                val intent = Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).apply {
+                    putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, packageName)
+                }
+                startActivity(intent)
+            }
+            Log.d(TAG, "Default SMS app role not requested")
+        }
+    }
+
 }
